@@ -427,8 +427,8 @@ function adminLogin() {
           <p class="muted">Manage participants, lecture days, questions, and progress exports.</p>
         </div>
         <form onsubmit="loginAdmin(event)" class="stack">
-          <input name="email" type="email" value="admin@example.com" required />
-          <input name="password" type="password" value="ChangeMe123!" required />
+          <input name="email" type="email" placeholder="Admin email" autocomplete="username" required />
+          <input name="password" type="password" placeholder="Admin password" autocomplete="current-password" required />
           <button>Open dashboard</button>
           ${state.message ? `<p class="error">${escapeHtml(state.message)}</p>` : ""}
         </form>
