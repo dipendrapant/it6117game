@@ -3,8 +3,8 @@
   "version": "1.0.0",
   "description": "Deployable IT6117-Helsedataanalyse med KI lecture follow-up game with admin dashboard and persistent progress tracking.",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node server.js",
+    "start": "node local-server.js",
+    "dev": "node local-server.js",
     "build": "node -e \"require('fs').mkdirSync('dist',{recursive:true}); require('fs').cpSync('public','dist',{recursive:true});\""
   },
   "dependencies": {
