@@ -1,5 +1,5 @@
 {
-  "name": "health-informatics-learning-game",
+  "name": "it6117-helsedataanalyse-ki-game",
   "version": "1.0.0",
   "description": "Deployable IT6117-Helsedataanalyse med KI lecture follow-up game with admin dashboard and persistent progress tracking.",
   "main": "server.js",
@@ -7,11 +7,17 @@
     "start": "node server.js",
     "dev": "node server.js"
   },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.4"
+  },
   "keywords": [
-    "health-informatics",
+    "it6117",
+    "helsedataanalyse",
+    "ki",
     "education",
     "game",
-    "sqlite"
+    "supabase",
+    "vercel"
   ],
   "author": "",
   "license": "MIT",
