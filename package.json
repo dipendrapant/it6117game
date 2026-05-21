@@ -1,0 +1,21 @@
+{
+  "name": "health-informatics-learning-game",
+  "version": "1.0.0",
+  "description": "Deployable IT6117-Helsedataanalyse med KI lecture follow-up game with admin dashboard and persistent progress tracking.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "keywords": [
+    "health-informatics",
+    "education",
+    "game",
+    "sqlite"
+  ],
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  }
+}
