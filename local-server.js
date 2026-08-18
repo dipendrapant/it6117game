@@ -3,6 +3,7 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const { execFileSync } = require("child_process");
+const { configuredCredentials, hashPassword, verifyPassword } = require("./lib/admin-credentials");
 
 const PORT = Number(process.env.PORT || 3000);
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, "data", "game.sqlite");
@@ -37,18 +38,6 @@ function one(sql) {
 
 function nowSql() {
   return new Date().toISOString();
-}
-
-function hashPassword(password, salt = crypto.randomBytes(16).toString("hex")) {
-  const hash = crypto.pbkdf2Sync(password, salt, 120000, 32, "sha256").toString("hex");
-  return `${salt}:${hash}`;
-}
-
-function verifyPassword(password, stored) {
-  if (!stored || !stored.includes(":")) return false;
-  const [salt, expected] = stored.split(":");
-  const actual = hashPassword(password, salt).split(":")[1];
-  return crypto.timingSafeEqual(Buffer.from(actual), Buffer.from(expected));
 }
 
 function initDb() {
@@ -132,9 +121,7 @@ function initDb() {
        OR day_id NOT IN (SELECT id FROM days);
   `);
 
-  if (!one("SELECT id FROM admins LIMIT 1;")) {
-    run(`INSERT INTO admins (email, password_hash, created_at) VALUES ('admin@example.com', ${sqlValue(hashPassword("ChangeMe123!"))}, ${sqlValue(nowSql())});`);
-  }
+  syncConfiguredAdmin();
 
   const dayCount = one("SELECT COUNT(*) AS count FROM days;").count;
   if (dayCount === 0) {
@@ -157,6 +144,20 @@ function initDb() {
   updateDefaultQuestions();
 
   ensureAccessCodes();
+}
+
+function syncConfiguredAdmin() {
+  const { email, password } = configuredCredentials();
+  const existing = one(`SELECT * FROM admins WHERE email = ${sqlValue(email)};`);
+  const passwordHash = existing && verifyPassword(password, existing.password_hash)
+    ? existing.password_hash
+    : hashPassword(password);
+  run(`
+    INSERT INTO admins (email, password_hash, created_at)
+    VALUES (${sqlValue(email)}, ${sqlValue(passwordHash)}, ${sqlValue(nowSql())})
+    ON CONFLICT(email) DO UPDATE SET password_hash = excluded.password_hash;
+    DELETE FROM admins WHERE email <> ${sqlValue(email)};
+  `);
 }
 
 function seedQuestions() {
@@ -985,6 +986,6 @@ server.on("error", error => {
 
 server.listen(PORT, () => {
   console.log(`IT6117-Helsedataanalyse med KI game running at http://localhost:${PORT}`);
-  console.log("Default admin: admin@example.com / ChangeMe123!");
+  console.log("Admin credentials loaded securely from the environment.");
   console.log("Example Day 1 access ID format: STUDENT002-DAY1");
 });

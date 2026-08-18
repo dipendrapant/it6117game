@@ -5,6 +5,7 @@
   "scripts": {
     "start": "node local-server.js",
     "dev": "node local-server.js",
+    "admin:generate-password": "node scripts/generate-admin-password.js",
     "build": "node -e \"require('fs').mkdirSync('dist',{recursive:true}); require('fs').cpSync('public','dist',{recursive:true});\""
   },
   "dependencies": {

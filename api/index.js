@@ -1,9 +1,9 @@
 const crypto = require("crypto");
 const { createClient } = require("@supabase/supabase-js");
 const { normalizeQuizDocument } = require("../lib/quiz-json");
+const { configuredCredentials, hashPassword, verifyPassword } = require("../lib/admin-credentials");
 
 const SESSION_TTL_MS = 1000 * 60 * 60 * 8;
-const SESSION_SECRET = process.env.ADMIN_SESSION_SECRET || "change-this-secret-before-deploying";
 
 let supabaseClient;
 
@@ -62,7 +62,9 @@ function base64url(value) {
 }
 
 function sign(value) {
-  return crypto.createHmac("sha256", SESSION_SECRET).update(value).digest("base64url");
+  const secret = process.env.ADMIN_SESSION_SECRET || "";
+  if (secret.length < 32) throw new Error("ADMIN_SESSION_SECRET must contain at least 32 characters");
+  return crypto.createHmac("sha256", secret).update(value).digest("base64url");
 }
 
 function makeSession(admin) {
@@ -93,21 +95,21 @@ function requireAdmin(req, res) {
   return admin;
 }
 
-function hashPassword(password, salt = crypto.randomBytes(16).toString("hex")) {
-  const hash = crypto.pbkdf2Sync(password, salt, 120000, 32, "sha256").toString("hex");
-  return `${salt}:${hash}`;
-}
-
-function verifyPassword(password, stored) {
-  if (!stored || !stored.includes(":")) return false;
-  const [salt, expected] = stored.split(":");
-  return new Promise((resolve, reject) => {
-    crypto.pbkdf2(password, salt, 120000, 32, "sha256", (error, derivedKey) => {
-      if (error) return reject(error);
-      const expectedBuffer = Buffer.from(expected, "hex");
-      resolve(expectedBuffer.length === derivedKey.length && crypto.timingSafeEqual(derivedKey, expectedBuffer));
-    });
-  });
+async function syncConfiguredAdmin(db) {
+  const { email, password } = configuredCredentials();
+  const existing = await one(db.from("admins").select("*").eq("email", email));
+  const passwordHash = existing && verifyPassword(password, existing.password_hash)
+    ? existing.password_hash
+    : hashPassword(password);
+  const { data, error } = await db.from("admins").upsert({
+    email,
+    password_hash: passwordHash,
+    created_at: existing?.created_at || nowSql()
+  }, { onConflict: "email" }).select("*").single();
+  if (error) throw error;
+  const { error: deleteError } = await db.from("admins").delete().neq("email", email);
+  if (deleteError) throw deleteError;
+  return data;
 }
 
 function normalizeAnswer(value) {
@@ -571,8 +573,8 @@ async function handler(req, res) {
 
     if (req.method === "POST" && path === "/api/admin/login") {
       const body = parseBody(req);
-      const admin = await one(db.from("admins").select("*").eq("email", body.email));
-      if (!admin || !(await verifyPassword(body.password || "", admin.password_hash))) return sendJson(res, { error: "Invalid admin email or password" }, 401);
+      const admin = await syncConfiguredAdmin(db);
+      if (body.email?.trim().toLowerCase() !== admin.email || !verifyPassword(body.password || "", admin.password_hash)) return sendJson(res, { error: "Invalid admin email or password" }, 401);
       const token = makeSession({ id: admin.id, email: admin.email });
       return sendJson(res, { admin: { email: admin.email } }, 200, { "Set-Cookie": `admin_session=${encodeURIComponent(token)}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=28800` });
     }

@@ -94,10 +94,6 @@ alter table attempts enable row level security;
 alter table progress enable row level security;
 alter table participant_day_access enable row level security;
 
-insert into admins (email, password_hash)
-values ('admin@example.com', 'c158026734a4fc5ddd91a176212e5807:0d60a1f555254705f8f93c13a447c0a0ff197b166e9dfd2f9ed3cae29652be9f')
-on conflict (email) do nothing;
-
 insert into days (day_number, title, description) values
   (1, 'Health data mining', 'Recall and apply core ideas for discovering useful patterns from health data.'),
   (2, 'Machine learning', 'Practice concepts around supervised and unsupervised learning, model training, and evaluation.'),
