@@ -469,6 +469,11 @@ th {
   font-weight: 800;
 }
 
+button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
 @media (max-width: 800px) {
   .topbar {
     align-items: flex-start;

@@ -4,11 +4,19 @@ const { createClient } = require("@supabase/supabase-js");
 const SESSION_TTL_MS = 1000 * 60 * 60 * 8;
 const SESSION_SECRET = process.env.ADMIN_SESSION_SECRET || "change-this-secret-before-deploying";
 
+let supabaseClient;
+
 function supabase() {
   const url = process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!url || !key) throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
-  return createClient(url, key, { auth: { persistSession: false } });
+  if (!supabaseClient) {
+    supabaseClient = createClient(url, key, {
+      auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+      global: { headers: { "X-Client-Info": "it6117-game-server" } }
+    });
+  }
+  return supabaseClient;
 }
 
 function nowSql() {
@@ -92,8 +100,13 @@ function hashPassword(password, salt = crypto.randomBytes(16).toString("hex")) {
 function verifyPassword(password, stored) {
   if (!stored || !stored.includes(":")) return false;
   const [salt, expected] = stored.split(":");
-  const actual = hashPassword(password, salt).split(":")[1];
-  return crypto.timingSafeEqual(Buffer.from(actual), Buffer.from(expected));
+  return new Promise((resolve, reject) => {
+    crypto.pbkdf2(password, salt, 120000, 32, "sha256", (error, derivedKey) => {
+      if (error) return reject(error);
+      const expectedBuffer = Buffer.from(expected, "hex");
+      resolve(expectedBuffer.length === derivedKey.length && crypto.timingSafeEqual(derivedKey, expectedBuffer));
+    });
+  });
 }
 
 function normalizeAnswer(value) {
@@ -297,12 +310,14 @@ async function accessByCode(db, accessCode) {
 
 async function ensureProgress(db, user, day) {
   const questions = await getQuestionsForDay(db, day.id);
-  const attempts = await many(db.from("attempts").select("question_id").eq("user_id", user.id).eq("is_correct", true).in("question_id", questions.map(q => q.id).length ? questions.map(q => q.id) : [-1]));
+  const [attempts, existing] = await Promise.all([
+    many(db.from("attempts").select("question_id").eq("user_id", user.id).eq("is_correct", true).in("question_id", questions.map(q => q.id).length ? questions.map(q => q.id) : [-1])),
+    one(db.from("progress").select("*").eq("user_id", user.id).eq("day_id", day.id))
+  ]);
   const completedIds = [...new Set(attempts.map(row => row.question_id))];
   const current = questions.find(q => !completedIds.includes(q.id)) || null;
   const completedCount = completedIds.length;
   const isCompleted = questions.length > 0 && completedCount >= questions.length;
-  const existing = await one(db.from("progress").select("*").eq("user_id", user.id).eq("day_id", day.id));
   const completedAt = isCompleted ? (existing?.completed_at || nowSql()) : null;
   const payload = {
     user_id: user.id,
@@ -314,28 +329,34 @@ async function ensureProgress(db, user, day) {
     completed_at: completedAt,
     updated_at: nowSql()
   };
-  const { error } = await db.from("progress").upsert(payload, { onConflict: "user_id,day_id" });
+  const { data, error } = await db.from("progress").upsert(payload, { onConflict: "user_id,day_id" }).select("*").single();
   if (error) throw error;
-  return one(db.from("progress").select("*").eq("user_id", user.id).eq("day_id", day.id));
+  return data;
 }
 
 async function completedQuestionHistory(db, user, day) {
   const questions = await getQuestionsForDay(db, day.id);
-  const history = [];
-  for (const question of questions) {
-    const attempt = await one(db.from("attempts").select("submitted_answer, selected_options, created_at").eq("user_id", user.id).eq("question_id", question.id).eq("is_correct", true).order("created_at", { ascending: false }).limit(1));
-    if (!attempt) continue;
+  if (!questions.length) return [];
+  const questionIds = questions.map(question => question.id);
+  const [attempts, optionRows] = await Promise.all([
+    many(db.from("attempts").select("question_id, submitted_answer, selected_options, created_at").eq("user_id", user.id).eq("is_correct", true).in("question_id", questionIds).order("created_at", { ascending: false })),
+    many(db.from("question_options").select("id, question_id, option_text").in("question_id", questionIds).order("id", { ascending: true }))
+  ]);
+  const latestAttempts = new Map();
+  for (const attempt of attempts) if (!latestAttempts.has(attempt.question_id)) latestAttempts.set(attempt.question_id, attempt);
+  return questions.flatMap(question => {
+    const attempt = latestAttempts.get(question.id);
+    if (!attempt) return [];
     const selectedIds = Array.isArray(attempt.selected_options) ? attempt.selected_options.map(Number) : [];
-    const options = await getOptions(db, question.id);
-    history.push({
+    const options = optionRows.filter(option => option.question_id === question.id).map(({ id, option_text }) => ({ id, option_text }));
+    return [{
       ...publicQuestion(question),
       options,
       completed_at: attempt.created_at,
       submitted_answer: question.question_type === "short_text" ? attempt.submitted_answer : "",
       selected_options: options.filter(option => selectedIds.includes(option.id)).map(option => option.option_text)
-    });
-  }
-  return history;
+    }];
+  });
 }
 
 async function progressSummaryForUser(db, user) {
@@ -350,12 +371,11 @@ async function progressSummaryForUser(db, user) {
   return result;
 }
 
-async function progressReport(db) {
-  const users = await many(db.from("users").select("*").order("created_at", { ascending: false }));
+async function progressReport(db, suppliedSnapshot = null) {
+  const snapshot = suppliedSnapshot || await progressSnapshot(db);
   const rows = [];
-  for (const user of users) {
-    for (const item of await progressSummaryForUser(db, user)) {
-      const current = item.progress.current_question_id ? await one(db.from("questions").select("question_order").eq("id", item.progress.current_question_id)) : null;
+  for (const user of snapshot.users) {
+    for (const item of snapshot.summaries.get(user.id)) {
       rows.push({
         participant_id: user.user_id,
         name: user.name || "",
@@ -365,7 +385,7 @@ async function progressReport(db) {
         total_questions: item.progress.total_question_count,
         percent_completed: item.percent,
         attempts: item.attempts,
-        current_question: current?.question_order || "",
+        current_question: item.currentQuestion || "",
         completed: item.progress.is_day_completed ? "completed" : "not completed"
       });
     }
@@ -373,14 +393,13 @@ async function progressReport(db) {
   return rows;
 }
 
-async function progressMatrix(db) {
-  const users = await many(db.from("users").select("*").order("created_at", { ascending: false }));
+async function progressMatrix(db, suppliedSnapshot = null) {
+  const snapshot = suppliedSnapshot || await progressSnapshot(db);
   const matrix = [];
-  for (const user of users) {
-    const accessCodes = await participantAccessCodes(db, user.id);
+  for (const user of snapshot.users) {
+    const accessCodes = snapshot.accessCodes.filter(code => code.user_id === user.id);
     const days = [];
-    for (const item of await progressSummaryForUser(db, user)) {
-      const current = item.progress.current_question_id ? await one(db.from("questions").select("question_order").eq("id", item.progress.current_question_id)) : null;
+    for (const item of snapshot.summaries.get(user.id)) {
       days.push({
         day_id: item.day.id,
         day_number: item.day.day_number,
@@ -390,13 +409,51 @@ async function progressMatrix(db) {
         total_questions: item.progress.total_question_count,
         percent_completed: item.percent,
         attempts: item.attempts,
-        current_question: current?.question_order || "",
+        current_question: item.currentQuestion || "",
         completed: item.progress.is_day_completed
       });
     }
     matrix.push({ id: user.id, participant_id: user.user_id, name: user.name || "", is_active: user.is_active, days });
   }
   return matrix;
+}
+
+async function progressSnapshot(db) {
+  const [users, days, questions, attempts, progressRows, accessCodes] = await Promise.all([
+    many(db.from("users").select("id,user_id,name,created_at,is_active").order("created_at", { ascending: false })),
+    many(db.from("days").select("*").order("day_number", { ascending: true })),
+    many(db.from("questions").select("id,day_id,question_order").order("question_order", { ascending: true })),
+    many(db.from("attempts").select("user_id,question_id,is_correct")),
+    many(db.from("progress").select("*")),
+    many(db.from("participant_day_access").select("user_id,day_id,access_code"))
+  ]);
+  const questionById = new Map(questions.map(question => [question.id, question]));
+  const summaries = new Map();
+  for (const user of users) {
+    summaries.set(user.id, days.map(day => {
+      const dayQuestions = questions.filter(question => question.day_id === day.id);
+      const questionIds = new Set(dayQuestions.map(question => question.id));
+      const userAttempts = attempts.filter(attempt => attempt.user_id === user.id && questionIds.has(attempt.question_id));
+      const completedIds = new Set(userAttempts.filter(attempt => attempt.is_correct).map(attempt => attempt.question_id));
+      const stored = progressRows.find(row => row.user_id === user.id && row.day_id === day.id);
+      const current = dayQuestions.find(question => !completedIds.has(question.id)) || null;
+      const completedCount = completedIds.size;
+      const completed = dayQuestions.length > 0 && completedCount >= dayQuestions.length;
+      const progress = {
+        ...(stored || {}), user_id: user.id, day_id: day.id,
+        current_question_id: current?.id || null,
+        completed_question_count: completedCount,
+        total_question_count: dayQuestions.length,
+        is_day_completed: completed
+      };
+      return {
+        day, progress, attempts: userAttempts.length,
+        percent: dayQuestions.length ? Math.round((completedCount / dayQuestions.length) * 100) : 0,
+        currentQuestion: questionById.get(progress.current_question_id)?.question_order || ""
+      };
+    }));
+  }
+  return { users, days, questions, accessCodes, summaries };
 }
 
 async function addQuestion(db, payload) {
@@ -499,7 +556,7 @@ async function handler(req, res) {
     if (req.method === "POST" && path === "/api/admin/login") {
       const body = parseBody(req);
       const admin = await one(db.from("admins").select("*").eq("email", body.email));
-      if (!admin || !verifyPassword(body.password || "", admin.password_hash)) return sendJson(res, { error: "Invalid admin email or password" }, 401);
+      if (!admin || !(await verifyPassword(body.password || "", admin.password_hash))) return sendJson(res, { error: "Invalid admin email or password" }, 401);
       const token = makeSession({ id: admin.id, email: admin.email });
       return sendJson(res, { admin: { email: admin.email } }, 200, { "Set-Cookie": `admin_session=${encodeURIComponent(token)}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=28800` });
     }
@@ -510,10 +567,17 @@ async function handler(req, res) {
     if (req.method === "POST" && path === "/api/admin/logout") return sendJson(res, { ok: true }, 200, { "Set-Cookie": "admin_session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0" });
 
     if (req.method === "GET" && path === "/api/admin/participants") {
-      await ensureAccessCodes(db);
-      const users = await many(db.from("users").select("id,user_id,name,created_at,is_active").order("created_at", { ascending: false }));
-      const participants = [];
-      for (const user of users) participants.push({ ...user, access_codes: await participantAccessCodes(db, user.id) });
+      const [users, codes] = await Promise.all([
+        many(db.from("users").select("id,user_id,name,created_at,is_active").order("created_at", { ascending: false })),
+        many(db.from("participant_day_access").select("id,user_id,day_id,access_code,days(day_number,title)"))
+      ]);
+      const participants = users.map(user => ({
+        ...user,
+        access_codes: codes.filter(code => code.user_id === user.id).map(code => ({
+          id: code.id, access_code: code.access_code, day_id: code.day_id,
+          day_number: code.days.day_number, title: code.days.title
+        })).sort((a, b) => a.day_number - b.day_number)
+      }));
       return sendJson(res, { participants });
     }
 
@@ -559,12 +623,14 @@ async function handler(req, res) {
     }
 
     if (req.method === "GET" && path === "/api/admin/days") {
-      const days = await many(db.from("days").select("*").order("day_number", { ascending: true }));
-      const fullDays = [];
-      for (const day of days) {
-        const questions = await getQuestionsForDay(db, day.id);
-        fullDays.push({ ...day, questions: await Promise.all(questions.map(async q => ({ ...q, options: await getOptions(db, q.id, true) }))) });
-      }
+      const [days, questions, options] = await Promise.all([
+        many(db.from("days").select("*").order("day_number", { ascending: true })),
+        many(db.from("questions").select("*").order("question_order", { ascending: true }).order("id", { ascending: true })),
+        many(db.from("question_options").select("*").order("id", { ascending: true }))
+      ]);
+      const fullDays = days.map(day => ({ ...day, questions: questions.filter(question => question.day_id === day.id).map(question => ({
+        ...question, options: options.filter(option => option.question_id === question.id)
+      })) }));
       return sendJson(res, { days: fullDays });
     }
 
@@ -600,7 +666,10 @@ async function handler(req, res) {
       return sendJson(res, { ok: true });
     }
 
-    if (req.method === "GET" && path === "/api/admin/progress") return sendJson(res, { rows: await progressReport(db), matrix: await progressMatrix(db) });
+    if (req.method === "GET" && path === "/api/admin/progress") {
+      const snapshot = await progressSnapshot(db);
+      return sendJson(res, { rows: await progressReport(db, snapshot), matrix: await progressMatrix(db, snapshot) });
+    }
 
     if (req.method === "GET" && path === "/api/admin/export.csv") {
       const rows = await progressReport(db);

@@ -77,6 +77,14 @@ create table if not exists participant_day_access (
   unique (user_id, day_id)
 );
 
+-- Keep the hot student and dashboard queries on indexes as usage grows.
+create index if not exists questions_day_order_idx on questions (day_id, question_order, id);
+create index if not exists question_options_question_idx on question_options (question_id, id);
+create index if not exists attempts_user_question_idx on attempts (user_id, question_id);
+create index if not exists attempts_user_correct_question_idx on attempts (user_id, question_id, created_at desc) where is_correct = true;
+create index if not exists progress_user_day_idx on progress (user_id, day_id);
+create index if not exists participant_day_access_user_day_idx on participant_day_access (user_id, day_id);
+
 alter table users enable row level security;
 alter table admins enable row level security;
 alter table days enable row level security;

@@ -1,4 +1,5 @@
 const app = document.querySelector("#app");
+const inflightGets = new Map();
 
 const state = {
   participant: JSON.parse(localStorage.getItem("participantSession") || "null"),
@@ -15,15 +16,35 @@ const state = {
 };
 
 async function api(path, options = {}) {
-  const response = await fetch(path, {
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
-    credentials: "same-origin",
-    ...options
-  });
-  const isCsv = response.headers.get("content-type")?.includes("text/csv");
-  const data = isCsv ? await response.text() : await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error || "Request failed");
-  return data;
+  const method = options.method || "GET";
+  if (method === "GET" && inflightGets.has(path)) return inflightGets.get(path);
+  const activeButton = document.activeElement?.tagName === "BUTTON" ? document.activeElement : null;
+  if (activeButton) activeButton.disabled = true;
+  const request = (async () => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    try {
+      const response = await fetch(path, {
+        credentials: "same-origin",
+        ...options,
+        headers: options.body ? { "Content-Type": "application/json", ...(options.headers || {}) } : options.headers,
+        signal: options.signal || controller.signal
+      });
+      const isCsv = response.headers.get("content-type")?.includes("text/csv");
+      const data = isCsv ? await response.text() : await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || "Request failed");
+      return data;
+    } catch (error) {
+      if (error.name === "AbortError") throw new Error("The server took too long to respond. Please try again.");
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+      if (activeButton?.isConnected) activeButton.disabled = false;
+      if (method === "GET") inflightGets.delete(path);
+    }
+  })();
+  if (method === "GET") inflightGets.set(path, request);
+  return request;
 }
 
 function html(strings, ...values) {
