@@ -1,5 +1,6 @@
 const crypto = require("crypto");
 const { createClient } = require("@supabase/supabase-js");
+const { normalizeQuizDocument } = require("../lib/quiz-json");
 
 const SESSION_TTL_MS = 1000 * 60 * 60 * 8;
 const SESSION_SECRET = process.env.ADMIN_SESSION_SECRET || "change-this-secret-before-deploying";
@@ -475,6 +476,21 @@ async function addQuestion(db, payload) {
   return question;
 }
 
+async function replaceDayQuestions(db, dayId, questions) {
+  const { error: deleteError } = await db.from("questions").delete().eq("day_id", dayId);
+  if (deleteError) throw deleteError;
+  const inserted = [];
+  for (const question of questions) inserted.push(await addQuestion(db, {
+    dayId, order: question.questionOrder, type: question.questionType, text: question.questionText,
+    imageUrl: question.imageUrl, correctAnswer: question.correctAnswer,
+    expectedWordCount: question.expectedWordCount, explanation: question.explanation,
+    options: question.options.map(option => [option.optionText, option.isCorrect])
+  }));
+  const { error: progressError } = await db.from("progress").delete().eq("day_id", dayId);
+  if (progressError) throw progressError;
+  return inserted;
+}
+
 async function handler(req, res) {
   const db = supabase();
   const url = new URL(req.url, `https://${req.headers.host || "localhost"}`);
@@ -645,6 +661,15 @@ async function handler(req, res) {
       const body = parseBody(req);
       const question = await addQuestion(db, { dayId: body.dayId, order: body.questionOrder, type: body.questionType, text: body.questionText, imageUrl: body.imageUrl, correctAnswer: body.correctAnswer, expectedWordCount: body.expectedWordCount, explanation: body.explanation, options: (body.options || []).map(option => [option.optionText, Boolean(option.isCorrect)]) });
       return sendJson(res, { question }, 201);
+    }
+
+    if (req.method === "POST" && path === "/api/admin/questions/import") {
+      const body = parseBody(req);
+      const day = await one(db.from("days").select("id,day_number").eq("id", Number(body.dayId)));
+      if (!day) return sendJson(res, { error: "Select a valid lecture day." }, 400);
+      const questions = normalizeQuizDocument(body.quiz, day.day_number);
+      const inserted = await replaceDayQuestions(db, day.id, questions);
+      return sendJson(res, { ok: true, imported: inserted.length, dayNumber: day.day_number });
     }
 
     if (req.method === "PUT" && path.startsWith("/api/admin/questions/")) {

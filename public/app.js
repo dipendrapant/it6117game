@@ -629,6 +629,18 @@ function daysAdmin() {
 function questionsAdmin() {
   return html`
     <section class="stack">
+      <form class="panel stack" onsubmit="importQuestions(event)">
+        <div>
+          <h2>Import questions from JSON</h2>
+          <p class="muted">Upload a JSON file to replace that day's questions, options, correct answers, and existing progress immediately.</p>
+        </div>
+        <div class="form-grid">
+          <select name="dayId" required>${state.adminData.days.map(day => `<option value="${day.id}">Day ${day.day_number} · ${escapeHtml(day.title)}</option>`).join("")}</select>
+          <input name="quizFile" type="file" accept="application/json,.json" required />
+        </div>
+        <button>Upload and replace questions</button>
+        <p class="small muted">Accepted keys include questions, question/questionText, options/choices, and correctAnswer. Correct options may instead use isCorrect.</p>
+      </form>
       <form class="panel stack" onsubmit="saveQuestion(event)">
         <h2>Add question</h2>
         <div class="form-grid">
@@ -677,6 +689,20 @@ function questionsAdmin() {
       `).join("")}
     </section>
   `;
+}
+
+async function importQuestions(event) {
+  event.preventDefault();
+  const form = new FormData(event.target);
+  try {
+    const quiz = JSON.parse(await form.get("quizFile").text());
+    const result = await api("/api/admin/questions/import", { method: "POST", body: JSON.stringify({ dayId: Number(form.get("dayId")), quiz }) });
+    await loadAdminData();
+    state.message = `Imported ${result.imported} questions for Day ${result.dayNumber}.`;
+  } catch (error) {
+    state.message = error instanceof SyntaxError ? "That file is not valid JSON." : error.message;
+  }
+  render();
 }
 
 function optionsToText(options) {
